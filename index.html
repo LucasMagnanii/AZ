@@ -3440,11 +3440,15 @@ function addProb(id) { _guard('addProb_'+id, () => _addProb(id)); }
 function _addProb(id) {
   const title = sanitizeInput(document.getElementById('pp').value);
   if (!title) { showToast('Informe o título.','error'); return; }
+  // datetime-local devolve string ingênua (sem timezone). Converte para ISO UTC para que
+  // o Supabase (timestamptz) e o cliente concordem sobre o instante representado.
+  const pdVal = document.getElementById('pd').value;
+  const dateIso = pdVal ? new Date(pdVal).toISOString() : new Date().toISOString();
   const prob = {
     uid: 'p_' + Date.now() + '_' + Math.random().toString(36).slice(2,7),
     type: document.getElementById('pt').value, title,
     desc: document.getElementById('pdesc').value.trim(),
-    date: document.getElementById('pd').value || new Date().toISOString(),
+    date: dateIso,
     os:   document.getElementById('pos').value.trim(),
     osOpen: document.getElementById('pos-open').checked,
     status: 'open', ts: new Date().toISOString(),
@@ -3513,7 +3517,19 @@ function resolveP(id, i) {
 }
 function deleteP(id, i) {
   if(!confirm('Remover este problema?'))return;
+  const p = ST[id].problems[i];
   ST[id].problems.splice(i,1); saveST(); renderSidebar(); renderProblemas(); renderCards();
+  // Remove do Supabase casando por (maquina, titulo, data_hora) — tabela usa bigserial, não temos o id aqui.
+  if (p) {
+    (async () => {
+      try {
+        const params = `maquina=eq.${encodeURIComponent(id)}&titulo=eq.${encodeURIComponent(p.title||'')}&data_hora=eq.${encodeURIComponent(p.date||p.ts||'')}`;
+        await fetch(`${SB_URL}/rest/v1/problemas?${params}`, {
+          method: 'DELETE', headers: SB_HEADERS
+        });
+      } catch(e){ console.warn('deleteP sync falhou:', e); }
+    })();
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -4308,8 +4324,11 @@ async function initFromSupabase() {
         if (!ST[id]) ST[id] = {readings:{},problems:[],history:[],customSheet:null};
         const probsFromSB = byMachine[id] || [];
         const localProbs = ST[id].problems || [];
-        // Chave natural: titulo + data_hora (ISO)
-        const keyOf = p => `${(p.title||'').trim()}|${(p.date||p.ts||'').toString()}`;
+        // Chave natural: titulo + data_hora normalizado para ISO UTC canônico.
+        // Server devolve "2026-04-16T20:59:00+00:00"; local pode ter "...Z" ou sem TZ.
+        // Converter via Date() equaliza os dois formatos para o mesmo instante.
+        const normTs = d => { try { const t = new Date(d).getTime(); return isNaN(t) ? String(d) : new Date(t).toISOString(); } catch { return String(d); } };
+        const keyOf = p => `${(p.title||'').trim()}|${normTs(p.date||p.ts||'')}`;
         const localByKey = new Map(localProbs.map(p => [keyOf(p), p]));
         const merged = [];
         // 1) Para cada problema do servidor, combina com o local se houver.
